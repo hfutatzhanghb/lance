@@ -1022,9 +1022,10 @@ impl ObjectStore {
 
     /// Atomically creates an object without replacing an existing object.
     ///
-    /// Local stores publish a uniquely named staging object with a conditional
-    /// rename. Other stores use their conditional create operation. Tencent COS
-    /// is rejected because it can silently ignore conditional create requests.
+    /// Local stores and HDFS publish a uniquely named staging object with a
+    /// conditional rename. Other stores use their conditional create operation.
+    /// Tencent COS is rejected because it can silently ignore conditional create
+    /// requests.
     ///
     /// Returns [`object_store::Error::NotSupported`] without writing when the
     /// backend cannot reliably provide put-if-absent semantics.
@@ -1041,7 +1042,7 @@ impl ObjectStore {
             });
         }
 
-        if self.is_local() {
+        if self.is_local() || self.scheme == "hdfs" {
             let staging_path =
                 Path::from(format!("{}.tmp.{}", path, uuid::Uuid::new_v4().simple()));
             self.inner.put(&staging_path, content).await?;
@@ -1886,15 +1887,23 @@ mod tests {
         Ok(contents)
     }
 
+    #[rstest]
+    #[case::local("file")]
+    #[case::hdfs("hdfs")]
     #[tokio::test]
-    async fn test_put_if_absent() {
+    async fn test_put_if_absent(#[case] scheme: &str) {
         let temp_dir = TempStrDir::default();
         let path = Path::from(format!("{}/atomic-create", temp_dir.as_str()));
-        let store = ObjectStore::local();
+        let mut store = ObjectStore::local();
+        store.scheme = scheme.to_string();
+        let tracker = IOTracker::default();
+        store.inner = tracker.wrap("", store.inner);
         store
             .put_if_absent(&path, Bytes::from_static(b"first").into())
             .await
             .unwrap();
+        // A staging PUT and a rename, not a conditional PUT to the destination.
+        assert_eq!(tracker.incremental_stats().write_iops, 2);
         let error = store
             .put_if_absent(&path, Bytes::from_static(b"second").into())
             .await
@@ -1906,6 +1915,11 @@ mod tests {
         assert_eq!(
             store.read_one_all(&path).await.unwrap(),
             b"first".as_slice()
+        );
+        // The failed conditional rename must not leave its staging object behind.
+        assert_eq!(
+            store.read_dir(temp_dir.as_str()).await.unwrap(),
+            vec!["atomic-create"]
         );
     }
 

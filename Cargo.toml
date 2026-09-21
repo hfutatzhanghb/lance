@@ -32,6 +32,12 @@ exclude = ["python", "java/lance-jni"]
 resolver = "3"
 
 
+# Keep the external HDFS backend on the same storage and error types as this
+# checkout. Path dependencies and registry dependencies are distinct sources.
+[patch.crates-io]
+lance-core = { path = "rust/lance-core" }
+lance-io = { path = "rust/lance-io" }
+
 [workspace.package]
 version = "12.0.0"
 edition = "2024"
@@ -67,6 +73,9 @@ lance-derive = { version = "=12.0.0", path = "./rust/lance-derive" }
 lance-encoding = { version = "=12.0.0", path = "./rust/lance-encoding" }
 lance-file = { version = "=12.0.0", path = "./rust/lance-file" }
 lance-geo = { version = "=12.0.0", path = "./rust/lance-geo" }
+lance-hdfs-backend = { version = "=0.2.1", default-features = false, features = [
+    "hdfs",
+] }
 lance-index = { version = "=12.0.0", path = "./rust/lance-index" }
 lance-index-core = { version = "=12.0.0", path = "./rust/lance-index-core" }
 lance-io = { version = "=12.0.0", path = "./rust/lance-io", default-features = false }
@@ -177,8 +186,8 @@ moka = { version = "0.12", features = ["future", "sync"] }
 ndarray = { version = "0.16.1", features = ["matrixmultiply-threading"] }
 num-traits = "0.2"
 object_store = { version = "0.14.1" }
-opendal = { version = "0.59.1" }
-object_store_opendal = { version = "0.60.1" }
+opendal = { version = "0.59.2" }
+object_store_opendal = { version = "0.60.2" }
 parquet = { version = "58.0.0", default-features = false, features = [
     "arrow",
     "async",
