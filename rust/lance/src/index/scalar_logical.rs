@@ -5,6 +5,7 @@
 
 use lance_core::utils::row_addr_remap::RowAddrRemap;
 use std::any::Any;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -341,20 +342,25 @@ pub async fn open_named_scalar_index(
     index_name: &str,
     metrics: &dyn MetricsCollector,
 ) -> Result<Arc<dyn ScalarIndex>> {
-    open_scalar_index_segments(dataset, column, index_name, None, metrics).await
+    open_scalar_index_segments(dataset, column, index_name, None, None, metrics).await
 }
 
-/// Open scalar index segments whose coverage intersects `fragments`.
+/// Open selected scalar index segments whose coverage intersects `fragments`.
 ///
-/// `None` preserves the unscoped behavior and opens every usable segment.
+/// A `None` scope preserves the unscoped behavior for that dimension. UUID selection happens
+/// before any segment is opened.
 pub async fn open_scalar_index_segments(
     dataset: &Dataset,
     column: &str,
     index_name: &str,
     fragments: Option<&RoaringBitmap>,
+    segment_uuids: Option<&HashSet<uuid::Uuid>>,
     metrics: &dyn MetricsCollector,
 ) -> Result<Arc<dyn ScalarIndex>> {
     let mut indices = load_named_scalar_segments(dataset, column, index_name).await?;
+    if let Some(segment_uuids) = segment_uuids {
+        indices.retain(|index| segment_uuids.contains(&index.uuid));
+    }
     if let Some(fragments) = fragments {
         indices.retain(|index| {
             index
@@ -510,6 +516,7 @@ mod tests {
             "value",
             "value_btree",
             Some(&scope),
+            None,
             &NoOpMetricsCollector,
         )
         .await
@@ -587,6 +594,7 @@ mod tests {
             "value",
             "value_btree_pairs",
             Some(&RoaringBitmap::from_iter([target_fragment])),
+            None,
             &NoOpMetricsCollector,
         )
         .await
