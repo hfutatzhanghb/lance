@@ -101,11 +101,11 @@ use crate::dataset::row_offsets_to_row_addresses;
 use crate::dataset::rowids::{live_row_addrs_to_row_ids, translate_addr_treemap_to_row_ids};
 use crate::dataset::utils::SchemaAdapter;
 use crate::index::DatasetIndexInternalExt;
-use crate::index::scalar::{IndexDetails, fetch_index_details};
 use crate::index::scalar::inverted::{
     fts_index_fragment_bitmap, load_segment_details, load_segments, normalize_inverted_details,
     resolve_fts_field, resolve_query_document_granularity, validate_combined_fields_target_column,
 };
+use crate::index::scalar::{IndexDetails, fetch_index_details};
 use crate::index::scalar_logical::{load_named_scalar_segments, scalar_index_fragment_bitmap};
 use crate::index::vector::utils::{
     default_distance_type_for, get_vector_dim, get_vector_type, validate_distance_type_for,
@@ -1477,48 +1477,51 @@ impl Dataset {
             .transpose()?;
 
         let all_indices = self.load_indices().await?;
-        let (selected_segments, selected_segment_uuids, fragment_scope) =
-            if let Some(segment_uuids) = segment_uuids {
-                if segment_uuids.is_empty() {
-                    return Err(Error::invalid_input(
-                        "segment_uuids must contain at least one UUID",
-                    ));
-                }
-                let selected_uuid_set = segment_uuids.iter().copied().collect::<HashSet<_>>();
-                if selected_uuid_set.len() != segment_uuids.len() {
+        let (selected_segments, selected_segment_uuids, fragment_scope) = if let Some(
+            segment_uuids,
+        ) = segment_uuids
+        {
+            if segment_uuids.is_empty() {
+                return Err(Error::invalid_input(
+                    "segment_uuids must contain at least one UUID",
+                ));
+            }
+            let selected_uuid_set = segment_uuids.iter().copied().collect::<HashSet<_>>();
+            if selected_uuid_set.len() != segment_uuids.len() {
+                return Err(Error::invalid_input(format!(
+                    "segment_uuids contains duplicate UUIDs: {segment_uuids:?}"
+                )));
+            }
+
+            let mut selected_segments = Vec::with_capacity(segment_uuids.len());
+            let mut selected_coverage = RoaringBitmap::new();
+            for segment_uuid in segment_uuids {
+                let segment = all_indices
+                    .iter()
+                    .find(|segment| segment.uuid == *segment_uuid)
+                    .ok_or_else(|| {
+                        Error::invalid_input(format!(
+                            "Scalar index segment {segment_uuid} does not exist"
+                        ))
+                    })?;
+                if segment.name != index_name {
                     return Err(Error::invalid_input(format!(
-                        "segment_uuids contains duplicate UUIDs: {segment_uuids:?}"
+                        "Scalar index segment {segment_uuid} belongs to index '{}', not requested index '{index_name}'",
+                        segment.name
                     )));
                 }
-
-                let mut selected_segments = Vec::with_capacity(segment_uuids.len());
-                let mut selected_coverage = RoaringBitmap::new();
-                for segment_uuid in segment_uuids {
-                    let segment = all_indices
-                        .iter()
-                        .find(|segment| segment.uuid == *segment_uuid)
-                        .ok_or_else(|| {
-                            Error::invalid_input(format!(
-                                "Scalar index segment {segment_uuid} does not exist"
-                            ))
-                        })?;
-                    if segment.name != index_name {
-                        return Err(Error::invalid_input(format!(
-                            "Scalar index segment {segment_uuid} belongs to index '{}', not requested index '{index_name}'",
-                            segment.name
-                        )));
-                    }
-                    let Some(field_id) = segment.keyed_field() else {
-                        return Err(Error::invalid_input(format!(
-                            "Scalar index '{index_name}' segment {segment_uuid} has no keyed field"
-                        )));
-                    };
-                    let field = self.schema().field_by_id(field_id).ok_or_else(|| {
+                let Some(field_id) = segment.keyed_field() else {
+                    return Err(Error::invalid_input(format!(
+                        "Scalar index '{index_name}' segment {segment_uuid} has no keyed field"
+                    )));
+                };
+                let field = self.schema().field_by_id(field_id).ok_or_else(|| {
                         Error::internal(format!(
                             "Scalar index '{index_name}' segment {segment_uuid} references missing field ID {field_id}"
                         ))
                     })?;
-                    let field_path = if let Some(ancestors) = self.schema().field_ancestry_by_id(field.id) {
+                let field_path =
+                    if let Some(ancestors) = self.schema().field_ancestry_by_id(field.id) {
                         let field_refs = ancestors
                             .iter()
                             .map(|field| field.name.as_str())
@@ -1527,56 +1530,55 @@ impl Dataset {
                     } else {
                         field.name.clone()
                     };
-                    let details =
-                        IndexDetails(fetch_index_details(self, &field_path, segment).await?);
-                    if details.is_vector() || details.get_plugin().is_err() {
-                        return Err(Error::invalid_input(format!(
-                            "Index '{index_name}' segment {segment_uuid} is not a usable scalar index segment"
-                        )));
-                    }
-                    let coverage = segment.fragment_bitmap.as_ref().ok_or_else(|| {
+                let details = IndexDetails(fetch_index_details(self, &field_path, segment).await?);
+                if details.is_vector() || details.get_plugin().is_err() {
+                    return Err(Error::invalid_input(format!(
+                        "Index '{index_name}' segment {segment_uuid} is not a usable scalar index segment"
+                    )));
+                }
+                let coverage = segment.fragment_bitmap.as_ref().ok_or_else(|| {
                         Error::invalid_input(format!(
                             "Scalar index '{index_name}' segment {segment_uuid} is missing fragment coverage"
                         ))
                     })?;
-                    let current_coverage = coverage & self.fragment_bitmap.as_ref();
-                    if current_coverage.is_empty() {
-                        return Err(Error::invalid_input(format!(
-                            "Scalar index '{index_name}' segment {segment_uuid} does not cover any current dataset fragments"
-                        )));
-                    }
-                    selected_coverage |= current_coverage;
-                    selected_segments.push(segment.clone());
-                }
-
-                if let Some(requested_fragments) = requested_fragments.as_ref()
-                    && requested_fragments != &selected_coverage
-                {
+                let current_coverage = coverage & self.fragment_bitmap.as_ref();
+                if current_coverage.is_empty() {
                     return Err(Error::invalid_input(format!(
-                        "fragment_ids {:?} do not match selected segment coverage {:?} for scalar index '{index_name}'",
-                        requested_fragments.iter().collect::<Vec<_>>(),
-                        selected_coverage.iter().collect::<Vec<_>>()
+                        "Scalar index '{index_name}' segment {segment_uuid} does not cover any current dataset fragments"
                     )));
                 }
+                selected_coverage |= current_coverage;
+                selected_segments.push(segment.clone());
+            }
 
-                (
-                    selected_segments,
-                    Some(Arc::new(selected_uuid_set)),
-                    Some(selected_coverage),
-                )
-            } else {
-                let selected_segments = all_indices
-                    .iter()
-                    .filter(|segment| segment.name == index_name)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if selected_segments.is_empty() {
-                    return Err(Error::invalid_input(format!(
-                        "Scalar index '{index_name}' does not exist or has no usable segments"
-                    )));
-                }
-                (selected_segments, None, requested_fragments)
-            };
+            if let Some(requested_fragments) = requested_fragments.as_ref()
+                && requested_fragments != &selected_coverage
+            {
+                return Err(Error::invalid_input(format!(
+                    "fragment_ids {:?} do not match selected segment coverage {:?} for scalar index '{index_name}'",
+                    requested_fragments.iter().collect::<Vec<_>>(),
+                    selected_coverage.iter().collect::<Vec<_>>()
+                )));
+            }
+
+            (
+                selected_segments,
+                Some(Arc::new(selected_uuid_set)),
+                Some(selected_coverage),
+            )
+        } else {
+            let selected_segments = all_indices
+                .iter()
+                .filter(|segment| segment.name == index_name)
+                .cloned()
+                .collect::<Vec<_>>();
+            if selected_segments.is_empty() {
+                return Err(Error::invalid_input(format!(
+                    "Scalar index '{index_name}' does not exist or has no usable segments"
+                )));
+            }
+            (selected_segments, None, requested_fragments)
+        };
 
         let mut scanner = self.scan();
         scanner.filter(filter)?;
@@ -3943,12 +3945,9 @@ impl Scanner {
                     )
                     .await?
                         & target_fragments;
-                    let mut exec = ScalarIndexExec::new(
-                        self.dataset.clone(),
-                        index_query,
-                        result_format,
-                    )
-                    .with_fragment_scope(fragment_scope);
+                    let mut exec =
+                        ScalarIndexExec::new(self.dataset.clone(), index_query, result_format)
+                            .with_fragment_scope(fragment_scope);
                     if let Some(segment_uuids) = self
                         .scalar_index_selection
                         .as_ref()

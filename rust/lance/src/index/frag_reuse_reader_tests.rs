@@ -2303,16 +2303,10 @@ async fn fragment_scope_prunes_on_fri_effective_coverage() {
     // not intersect {10}).
     let scope_f10 = RoaringBitmap::from_iter([10]);
     let metrics = lance_index::metrics::LocalMetricsCollector::default();
-    let scoped = open_scalar_index_segments(
-        &dataset,
-        "i",
-        "i_idx",
-        Some(&scope_f10),
-        None,
-        &metrics,
-    )
-    .await
-    .unwrap();
+    let scoped =
+        open_scalar_index_segments(&dataset, "i", "i_idx", Some(&scope_f10), None, &metrics)
+            .await
+            .unwrap();
     assert_eq!(
         metrics
             .index_loads

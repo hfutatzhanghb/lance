@@ -4026,14 +4026,7 @@ fn inner_count_indexed_rows(
     let filter: String = jfilter.extract(env)?;
     let fragment_ids = extract_count_fragment_ids(env, &jfragment_ids)?;
 
-    count_indexed_rows(
-        env,
-        java_dataset,
-        index_name,
-        filter,
-        None,
-        fragment_ids,
-    )
+    count_indexed_rows(env, java_dataset, index_name, filter, None, fragment_ids)
 }
 
 #[unsafe(no_mangle)]

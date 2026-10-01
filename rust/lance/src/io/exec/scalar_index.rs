@@ -272,12 +272,23 @@ impl ScalarIndexExec {
                 (Some(fragments), _) if fragments.is_empty() => {
                     IndexExprResult::exact(RowAddrMask::allow_nothing())
                 }
-                (fragments, segment_uuids) if fragments.is_some() || segment_uuids.is_some() => {
+                (Some(fragments), segment_uuids) => {
                     expr.evaluate(
                         &ScopedScalarIndexLoader {
                             dataset: dataset.as_ref(),
-                            fragments,
+                            fragments: Some(fragments),
                             segment_uuids,
+                        },
+                        &metrics,
+                    )
+                    .await?
+                }
+                (None, Some(segment_uuids)) => {
+                    expr.evaluate(
+                        &ScopedScalarIndexLoader {
+                            dataset: dataset.as_ref(),
+                            fragments: None,
+                            segment_uuids: Some(segment_uuids),
                         },
                         &metrics,
                     )
