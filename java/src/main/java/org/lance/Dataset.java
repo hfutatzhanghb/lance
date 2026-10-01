@@ -1513,6 +1513,12 @@ public class Dataset implements Closeable {
    * is present, its set must equal the coverage; order does not matter. A mismatch is rejected with
    * an error that reports both sets.
    *
+   * <p>The selection is accepted only when it includes every segment that contributes to that
+   * coverage. After fragment reuse, one source segment can advertise every destination fragment
+   * while still depending on its siblings. An incomplete selection is rejected, and the error names
+   * the missing segment UUIDs. A segment whose coverage does not overlap the selection can be
+   * queried alone.
+   *
    * <p>An empty segment list, duplicate segment UUIDs, an unknown UUID, a UUID from a different
    * index, or a segment without fragment coverage is rejected. The existing three-argument method
    * remains available and does not take a segment list.
