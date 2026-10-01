@@ -1440,8 +1440,11 @@ impl Dataset {
     /// Count rows matching `filter` while pinning scalar-index planning to `index_name`.
     ///
     /// When `segment_uuids` is present, only those physical index segments are opened and their
-    /// current fragment coverage defines the count scope. In that mode, a supplied
-    /// `fragment_ids` list must exactly equal the selected segments' current coverage.
+    /// current fragment coverage defines the count scope. That coverage is accepted only when the
+    /// selection includes every segment that contributes to it. After a fragment-reuse rewrite, one
+    /// source segment can advertise every destination fragment while still depending on sibling
+    /// segments; an incomplete selection is rejected. A supplied `fragment_ids` list must exactly
+    /// equal the selected segments' current coverage.
     #[instrument(skip_all)]
     pub async fn count_indexed_rows(
         &self,
@@ -1550,6 +1553,15 @@ impl Dataset {
                 selected_coverage |= current_coverage;
                 selected_segments.push(segment.clone());
             }
+            // Rewritten coverage is the contributor closure: a sibling whose bitmap
+            // overlaps this scope still owns rows in those fragments. Opening only
+            // the requested UUIDs would publish that scope and then under-count.
+            reject_incomplete_segment_contributors(
+                index_name,
+                all_indices.as_ref(),
+                &selected_uuid_set,
+                &selected_coverage,
+            )?;
 
             if let Some(requested_fragments) = requested_fragments.as_ref()
                 && requested_fragments != &selected_coverage
@@ -1600,6 +1612,39 @@ impl Dataset {
         }
         scanner.count_rows().await
     }
+}
+
+/// Reject a UUID selection whose advertised fragments still depend on an unselected segment.
+fn reject_incomplete_segment_contributors(
+    index_name: &str,
+    indices: &[IndexMetadata],
+    selected_uuids: &HashSet<Uuid>,
+    selected_coverage: &RoaringBitmap,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut shared_fragments = RoaringBitmap::new();
+    for segment in indices {
+        if segment.name != index_name || selected_uuids.contains(&segment.uuid) {
+            continue;
+        }
+        let Some(coverage) = segment.fragment_bitmap.as_ref() else {
+            continue;
+        };
+        let overlap = coverage & selected_coverage;
+        if overlap.is_empty() {
+            continue;
+        }
+        shared_fragments |= overlap;
+        missing.push(segment.uuid);
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort_unstable();
+    Err(Error::invalid_input(format!(
+        "Scalar index '{index_name}' selection omits contributing segments {missing:?} for fragments {:?}. Select every segment that covers those fragments",
+        shared_fragments.iter().collect::<Vec<_>>()
+    )))
 }
 
 impl Scanner {
