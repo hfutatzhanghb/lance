@@ -884,6 +884,8 @@ pub struct MaterializeIndexExec {
     dataset: Arc<Dataset>,
     expr: ScalarIndexExpr,
     fragments: Arc<Vec<Fragment>>,
+    /// Physical segments to open. `None` loads the whole logical index.
+    segment_uuids: Option<Arc<HashSet<uuid::Uuid>>>,
     /// Row addresses blocked from the index result due to data overlay files committed after the
     /// index was built. ANDead into the candidate mask before row ID materialisation so that stale
     /// index entries never reach downstream operators.
@@ -960,10 +962,17 @@ impl MaterializeIndexExec {
             dataset,
             expr,
             fragments,
+            segment_uuids: None,
             overlay_block: None,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
+    }
+
+    /// Restrict index loading to these physical scalar index segments.
+    pub(crate) fn with_segment_uuids(mut self, segment_uuids: Arc<HashSet<uuid::Uuid>>) -> Self {
+        self.segment_uuids = Some(segment_uuids);
+        self
     }
 
     /// Block specific row addresses (see the `overlay_block` field) from the index result.
@@ -977,10 +986,18 @@ impl MaterializeIndexExec {
         expr: ScalarIndexExpr,
         dataset: Arc<Dataset>,
         fragments: Arc<Vec<Fragment>>,
+        segment_uuids: Option<Arc<HashSet<uuid::Uuid>>>,
         overlay_block: Option<RowAddrMask>,
         metrics: Arc<IndexMetrics>,
     ) -> Result<RecordBatch> {
-        let expr_result = expr.evaluate(dataset.as_ref(), metrics.as_ref());
+        // Legacy storage materializes index hits here. UUID selection has to be applied at load
+        // time; evaluating against the dataset opens every segment of the logical index.
+        let loader = ScopedScalarIndexLoader {
+            dataset: dataset.as_ref(),
+            fragments: None,
+            segment_uuids: segment_uuids.as_deref(),
+        };
+        let expr_result = expr.evaluate(&loader, metrics.as_ref());
         let span = debug_span!("create_prefilter");
         let prefilter = span.in_scope(|| {
             let fragment_bitmap =
@@ -1145,6 +1162,7 @@ impl ExecutionPlan for MaterializeIndexExec {
             self.expr.clone(),
             self.dataset.clone(),
             self.fragments.clone(),
+            self.segment_uuids.clone(),
             self.overlay_block.clone(),
             metrics,
         );

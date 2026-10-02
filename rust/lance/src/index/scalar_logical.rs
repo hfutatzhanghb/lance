@@ -2021,4 +2021,81 @@ mod tests {
             vec![1]
         );
     }
+
+    /// Legacy storage counts through MaterializeIndexExec. Deleting the unselected
+    /// segment directory must still leave the selected segment countable.
+    #[tokio::test]
+    async fn legacy_storage_count_opens_only_selected_segment() {
+        let test_dir = TempStrDir::default();
+        let mut dataset = lance_datagen::gen_batch()
+            .col("i", array::step::<Int32Type>())
+            .into_dataset_with_params(
+                test_dir.as_str(),
+                FragmentCount::from(2),
+                FragmentRowCount::from(4),
+                Some(WriteParams {
+                    max_rows_per_file: 4,
+                    data_storage_version: Some(lance_file::version::LanceFileVersion::Legacy),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dataset.manifest.data_storage_format.lance_file_format(),
+            lance_file::version::ConcreteFileVersion::V1
+        );
+
+        let params = ScalarIndexParams::for_builtin(BuiltinIndexType::BTree);
+        let fragment_ids: Vec<u32> = dataset
+            .get_fragments()
+            .iter()
+            .map(|fragment| fragment.id() as u32)
+            .collect();
+        let mut segments = Vec::new();
+        for fragment_id in &fragment_ids {
+            segments.push(
+                CreateIndexBuilder::new(&mut dataset, &["i"], IndexType::BTree, &params)
+                    .name("i_idx".to_string())
+                    .fragments(vec![*fragment_id])
+                    .execute_uncommitted()
+                    .await
+                    .unwrap(),
+            );
+        }
+        dataset
+            .commit_existing_index_segments("i_idx", "i", segments)
+            .await
+            .unwrap();
+        let committed = dataset.load_indices_by_name("i_idx").await.unwrap();
+        let selected = committed[0].uuid;
+        let omitted = committed[1].uuid;
+        assert_eq!(
+            dataset
+                .count_indexed_rows("i_idx", "i >= 0", Some(&[selected]), None)
+                .await
+                .unwrap(),
+            4
+        );
+
+        let omitted_dir = std::path::Path::new(test_dir.as_str())
+            .join("_indices")
+            .join(omitted.to_string());
+        assert!(omitted_dir.is_dir(), "{}", omitted_dir.display());
+        std::fs::remove_dir_all(&omitted_dir).unwrap();
+        drop(dataset);
+
+        let dataset = Dataset::open(test_dir.as_str()).await.unwrap();
+        assert_eq!(
+            dataset
+                .count_indexed_rows("i_idx", "i >= 0", Some(&[selected]), None)
+                .await
+                .unwrap(),
+            4
+        );
+        dataset
+            .count_indexed_rows("i_idx", "i >= 0", Some(&[omitted]), None)
+            .await
+            .unwrap_err();
+    }
 }
